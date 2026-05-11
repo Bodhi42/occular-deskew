@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "occular-deskew"
+version = "0.3.0"
+description = "Document deskew: light student regressor (fine) + Phase C orientation (coarse)"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "torchvision",
+    "Pillow",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+include = ["occular_deskew*"]
+
+[tool.setuptools.package-data]
+occular_deskew = ["weights/*.pth"]
