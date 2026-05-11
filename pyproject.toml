@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "occular-deskew"
 version = "0.3.0"
-description = "Document deskew: light student regressor (fine) + Phase C orientation (coarse)"
+description = "Document deskew: fine-angle regressor (±30°) + orientation classifier (0/90/180/270)"
 requires-python = ">=3.9"
 dependencies = [
     "torch",

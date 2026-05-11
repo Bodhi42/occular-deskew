@@ -31,12 +31,12 @@ Accepts a `PIL.Image` or a path to a file.
 
 Two-stage pipeline:
 
-1. **Light Student** (MobileNetV3-Small + Linear head) — fine angle ±30°. Trained on 160k oracle-cleaned documents.
-2. **Phase C orientation** (MobileNetV3-Large + AttentionPool + Cosine τ) — coarse 0°/90°/180°/270°. Train pool: 112k (47k Phase A + 24 domains + 139 countries).
+1. **Fine-angle regressor** (MobileNetV3-Small + Linear head) — predicts a small rotation angle in the range ±30°. Trained on 160k machine-labeled documents.
+2. **Orientation classifier** (MobileNetV3-Large + AttentionPool + cosine head) — classifies coarse orientation among 0° / 90° / 180° / 270°. Trained on 112k documents covering 139 countries and 24 document types.
 
-Order: student → rotate → adaptive crop → Phase C → total angle.
+Order: regressor → rotate → adaptive crop → classifier → total angle.
 
-## Quality (1000 in-distribution, GT = 0°)
+## Quality (1000 in-distribution images, GT = 0°)
 
 | acc≤2° | acc≤5° | AED | p95 |
 |---|---|---|---|
@@ -44,7 +44,7 @@ Order: student → rotate → adaptive crop → Phase C → total angle.
 
 On clean English forms (FUNSD): **99%** acc≤2°.
 
-The main source of remaining ≥5° errors is Phase C 90°/180°-flip (~88% of all "large" errors); the fine model errs by small angles in 5% of cases (≤8°).
+The main source of remaining ≥5° errors is the orientation classifier producing a 90°/180° flip (~88% of all "large" errors); the fine-angle regressor errs by small angles in about 5% of cases (≤8°).
 
 ---
 
@@ -81,17 +81,17 @@ upright.save("doc_upright.jpg")
 
 Двухступенчатый пайплайн:
 
-1. **Light Student** (MobileNetV3-Small + Linear head) — fine angle ±30°. Обучен на 160k oracle-cleaned документов.
-2. **Phase C orientation** (MobileNetV3-Large + AttentionPool + Cosine τ) — coarse 0°/90°/180°/270°. Train pool: 112k (47k Phase A + 24 domains + 139 countries).
+1. **Регрессор малых углов** (MobileNetV3-Small + Linear-голова) — предсказывает мелкий угол поворота в диапазоне ±30°. Обучен на 160k автоматически размеченных документов.
+2. **Классификатор ориентации** (MobileNetV3-Large + AttentionPool + cosine-голова) — определяет крупную ориентацию среди 0° / 90° / 180° / 270°. Обучен на 112k документов из 139 стран по 24 типам.
 
-Порядок: student → rotate → adaptive crop → Phase C → total angle.
+Порядок: регрессор → поворот → adaptive crop → классификатор → итоговый угол.
 
-## Качество (1000 in-distribution, GT=0°)
+## Качество (1000 in-distribution картинок, GT = 0°)
 
 | acc≤2° | acc≤5° | AED | p95 |
 |---|---|---|---|
 | 91.3% | 95.9% | 5.95° | 3.76° |
 
-На англоязычных формах (FUNSD): **99%** acc≤2°.
+На чистых англоязычных формах (FUNSD): **99%** acc≤2°.
 
-Главный источник остаточных ошибок ≥5° — Phase C 90°/180°-flip (~88% от всех «больших» ошибок); fine-модель ошибается мелко в 5% случаев (≤8°).
+Главный источник остаточных ошибок ≥5° — классификатор ориентации даёт 90°/180°-flip (~88% от всех «больших» ошибок); регрессор малых углов ошибается мелко примерно в 5% случаев (≤8°).

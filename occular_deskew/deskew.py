@@ -1,19 +1,19 @@
 """
-occular-deskew: определение и коррекция угла наклона документа.
+occular-deskew: document rotation detection and correction.
 
-v0.3.0 пайплайн:
-  Light Student (MobileNetV3-Small + Linear) → fine angle (±30°)
+v0.3.0 pipeline:
+  Fine-angle regressor (MobileNetV3-Small + Linear) → small angle (±30°)
   → rotate + adaptive crop
-  → Phase C orientation model (MobileNetV3-Large + AttentionPool + Cosine τ) → 0/90/180/270
+  → orientation classifier (MobileNetV3-Large + AttentionPool + Cosine τ) → 0/90/180/270
 
 Weights:
-  - orientation_phasec.pth — Phase C (Phase A pool + 24 domains + 139 countries, 112k train)
-  - skew_regressor.pth — Light Student trained on 160k oracle-cleaned images
+  - orientation_classifier.pth — coarse 0°/90°/180°/270° (112k docs, 139 countries, 24 types)
+  - fine_angle_regressor.pth — small-angle regressor (160k auto-labeled docs, ±30° range)
 
-Quality (1000 in-distribution, GT=0°):
-  - acc≤2° = 91.3%, acc≤5° = 95.9%, p95 = 3.76°
-  - Главный источник ошибок ≥5°: Phase C 90°/180°-flip (~88%);
-    student fine ошибается мелко в 5% случаев (≤8°).
+Quality (1000 in-distribution images, GT=0°):
+  acc≤2° = 91.3%, acc≤5° = 95.9%, p95 = 3.76°
+  Main remaining ≥5° error source: orientation classifier 90°/180°-flip (~88%);
+  fine regressor errs by ≤8° in about 5% of cases.
 """
 
 import numpy as np
@@ -24,8 +24,8 @@ from torchvision import transforms, models
 from PIL import Image
 from pathlib import Path
 
-_ORIENT_WEIGHTS = Path(__file__).parent / "weights" / "orientation_phasec.pth"
-_REGRESSOR_WEIGHTS = Path(__file__).parent / "weights" / "skew_regressor.pth"
+_ORIENT_WEIGHTS = Path(__file__).parent / "weights" / "orientation_classifier.pth"
+_REGRESSOR_WEIGHTS = Path(__file__).parent / "weights" / "fine_angle_regressor.pth"
 _ORIENT_ANGLES = [0, 90, 180, 270]
 _ORIENT_FEAT_DIM = 960
 _ORIENT_IMG_SIZE = 320
