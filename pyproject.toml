@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "occular-deskew"
-version = "0.3.0"
-description = "Document deskew: fine-angle regressor (±30°) + orientation classifier (0/90/180/270)"
+version = "0.4.0"
+description = "Document deskew: DINOv2-Small+LoRA fine-angle regressor (±45°) + SigLIP-Base+LoRA orientation classifier (0/90/180/270)"
 requires-python = ">=3.9"
 dependencies = [
-    "torch",
+    "torch>=2.0",
     "torchvision",
     "Pillow",
     "numpy",
+    "transformers>=4.40",
+    "peft>=0.10",
 ]
 
 [tool.setuptools.packages.find]

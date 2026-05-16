@@ -1,179 +1,141 @@
-"""
-occular-deskew: document rotation detection and correction.
+"""occular-deskew v0.4.0 — transformer-based document deskew.
 
-v0.3.0 pipeline:
-  Fine-angle regressor (MobileNetV3-Small + Linear) → small angle (±30°)
-  → rotate + adaptive crop
-  → orientation classifier (MobileNetV3-Large + AttentionPool + Cosine τ) → 0/90/180/270
+Pipeline:
+  1. Skew regressor (DINOv2-Small + LoRA r=8)  → fine angle ±45°
+  2. rotate + adaptive crop
+  3. Orientation classifier (SigLIP-Base + LoRA r=16) → 0° / 90° / 180° / 270°
+  4. total = (skew + orientation) % 360
 
 Weights:
-  - orientation_classifier.pth — coarse 0°/90°/180°/270° (112k docs, 139 countries, 24 types)
-  - fine_angle_regressor.pth — small-angle regressor (160k auto-labeled docs, ±30° range)
+  - dinov2_skew_lora_v0.4.0.pth   (89 MB, DINOv2-Small backbone + LoRA + reg head)
+  - siglip_orient_lora_v0.4.0.pth (378 MB, SigLIP-Base backbone + LoRA + class head)
 
-Quality (1000 in-distribution images, GT=0°):
-  acc≤2° = 91.3%, acc≤5° = 95.9%, p95 = 3.76°
-  Main remaining ≥5° error source: orientation classifier 90°/180°-flip (~88%);
-  fine regressor errs by ≤8° in about 5% of cases.
+On first call, transformers will lazily download the base model identifiers
+from HuggingFace if not already cached locally.
+
+Validation metrics (val_list × 4 rotations / clean_0deg val 32k):
+  - Orientation classifier (SigLIP+LoRA v2): val_acc 97.43% (best @ ep 12)
+  - Fine-angle regressor (DINOv2+LoRA, continued): AED 0.33°, p95 0.92°,
+    acc≤2°=98.7%, acc≤5°=99.8% on ±45° range
 """
+
+from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import transforms, models
-from PIL import Image
-from pathlib import Path
+from PIL import Image, ImageOps
+from torchvision import transforms
 
-_ORIENT_WEIGHTS = Path(__file__).parent / "weights" / "orientation_classifier.pth"
-_REGRESSOR_WEIGHTS = Path(__file__).parent / "weights" / "fine_angle_regressor.pth"
+_WEIGHTS_DIR = Path(__file__).parent / "weights"
+_SKEW_CKPT = _WEIGHTS_DIR / "dinov2_skew_v0.4.0.pth"
+_ORIENT_CKPT = _WEIGHTS_DIR / "siglip_orient_v0.4.0.pth"
+
+_SKEW_BACKBONE = "facebook/dinov2-small"
+_ORIENT_BACKBONE = "google/siglip-base-patch16-224"
 _ORIENT_ANGLES = [0, 90, 180, 270]
-_ORIENT_FEAT_DIM = 960
-_ORIENT_IMG_SIZE = 320
-_REGRESSOR_IMG_SIZE = 224
-_REGRESSOR_RANGE = 30.0
+_IMG_SIZE = 224
 
+_skew_model = None
+_skew_tfm = None
 _orient_model = None
 _orient_tfm = None
-_regressor = None
-_regressor_tfm = None
 _device = None
 
 
-# ============== Orientation: MobileNetV3-Large + AttentionPool + Cosine τ ==============
-
-class _CosineLearnableTemp(nn.Module):
-    def __init__(self, in_features, num_classes=4):
-        super().__init__()
-        self.weight = nn.Parameter(torch.randn(num_classes, in_features))
-        self.log_temperature = nn.Parameter(torch.tensor(np.log(16.0)))
-
-    def forward(self, x):
-        temp = self.log_temperature.exp()
-        x_norm = F.normalize(x, dim=1)
-        w_norm = F.normalize(self.weight, dim=1)
-        return temp * x_norm @ w_norm.t()
+# ============== Model builders ==============
 
 
-class _AttentionPool(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.attn = nn.Sequential(
-            nn.Conv2d(_ORIENT_FEAT_DIM, 128, 1),
-            nn.ReLU(),
-            nn.Conv2d(128, 1, 1),
-        )
+def _build_skew():
+    from transformers import AutoModel
+    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 
-    def forward(self, x):
-        w = self.attn(x)
-        w = w.view(w.size(0), -1)
-        w = F.softmax(w, dim=1)
-        w = w.view(w.size(0), 1, x.size(2), x.size(3))
-        return (x * w).sum(dim=[2, 3])
+    backbone = AutoModel.from_pretrained(_SKEW_BACKBONE)
+    backbone = get_peft_model(backbone, LoraConfig(
+        r=8, lora_alpha=16, lora_dropout=0.05, bias="none",
+        target_modules=["query", "key", "value", "dense"],
+    ))
+    head = nn.Sequential(
+        nn.LayerNorm(384),
+        nn.Linear(384, 256), nn.GELU(), nn.Dropout(0.1),
+        nn.Linear(256, 1),
+    )
+    ck = torch.load(str(_SKEW_CKPT), map_location="cpu", weights_only=True)
+    set_peft_model_state_dict(backbone, ck["lora"])
+    head.load_state_dict(ck["head"])
 
+    class _SkewModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = backbone
+            self.head = head
 
-class _OrientationModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        backbone = models.mobilenet_v3_large(weights=None)
-        self.features = backbone.features
-        self.pool = _AttentionPool()
-        self.proj = nn.Sequential(
-            nn.Linear(_ORIENT_FEAT_DIM, 1280),
-            nn.Hardswish(),
-            nn.Dropout(0.2),
-        )
-        self.head = _CosineLearnableTemp(1280)
+        def forward(self, x):
+            return self.head(self.backbone(x).last_hidden_state[:, 0])
 
-    def forward(self, x):
-        return self.head(self.proj(self.pool(self.features(x))))
+    return _SkewModel().eval()
 
 
-# ============== Skew regressor: MobileNetV3-Small + Linear head ==============
+def _build_orient():
+    from transformers import SiglipVisionModel
+    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 
-class _SkewRegressor(nn.Module):
-    def __init__(self):
-        super().__init__()
-        m = models.mobilenet_v3_small(weights=None)
-        in_features = m.classifier[0].in_features  # 576
-        self.features = m.features
-        self.avgpool = m.avgpool
-        self.head = nn.Sequential(
-            nn.Linear(in_features, 256), nn.Hardswish(),
-            nn.Dropout(0.1), nn.Linear(256, 1),
-        )
+    backbone = SiglipVisionModel.from_pretrained(_ORIENT_BACKBONE)
+    backbone = get_peft_model(backbone, LoraConfig(
+        r=16, lora_alpha=32, lora_dropout=0.15, bias="none",
+        target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
+    ))
+    head = nn.Sequential(
+        nn.LayerNorm(768),
+        nn.Linear(768, 512), nn.GELU(), nn.Dropout(0.2),
+        nn.Linear(512, 4),
+    )
+    ck = torch.load(str(_ORIENT_CKPT), map_location="cpu", weights_only=True)
+    set_peft_model_state_dict(backbone, ck["lora"])
+    head.load_state_dict(ck["head"])
 
-    def forward(self, x):
-        x = self.features(x)
-        x = self.avgpool(x).flatten(1)
-        return self.head(x)
+    class _OrientModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = backbone
+            self.head = head
 
+        def forward(self, x):
+            return self.head(self.backbone(x).pooler_output)
 
-# ============== model loaders ==============
+    return _OrientModel().eval()
+
 
 def _ensure_models():
-    global _orient_model, _orient_tfm, _regressor, _regressor_tfm, _device
-    if _orient_model is not None and _regressor is not None:
+    global _skew_model, _skew_tfm, _orient_model, _orient_tfm, _device
+    if _skew_model is not None and _orient_model is not None:
         return
 
     _device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    _orient_model = _OrientationModel()
-    _orient_model.load_state_dict(
-        torch.load(str(_ORIENT_WEIGHTS), map_location="cpu", weights_only=True)
-    )
-    _orient_model.eval().to(_device)
+    _skew_model = _build_skew().to(_device)
+    _skew_tfm = transforms.Compose([
+        transforms.Resize(int(_IMG_SIZE * 1.14),
+                          interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(_IMG_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    _orient_model = _build_orient().to(_device)
     _orient_tfm = transforms.Compose([
-        transforms.Resize(365),
-        transforms.CenterCrop(_ORIENT_IMG_SIZE),
+        transforms.Resize(int(_IMG_SIZE * 1.14),
+                          interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(_IMG_SIZE),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
-
-    # Адаптация: best.pth student'а сохранён как state_dict mobilenet_v3_small
-    # с custom classifier. Мы строим обёртку чтобы воспроизвести структуру.
-    student_state = torch.load(str(_REGRESSOR_WEIGHTS), map_location="cpu", weights_only=True)
-    _regressor = _build_regressor_from_state(student_state)
-    _regressor.eval().to(_device)
-    _regressor_tfm = transforms.Compose([
-        transforms.Resize(int(_REGRESSOR_IMG_SIZE * 1.14)),
-        transforms.CenterCrop(_REGRESSOR_IMG_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ])
-
-
-def _build_regressor_from_state(state_dict):
-    """state_dict student'а сохранён как mobilenet_v3_small с custom classifier.
-    Загружаем как родную torchvision сетку с переопределённым classifier."""
-    m = models.mobilenet_v3_small(weights=None)
-    in_features = m.classifier[0].in_features
-    m.classifier = nn.Sequential(
-        nn.Linear(in_features, 256), nn.Hardswish(),
-        nn.Dropout(0.1), nn.Linear(256, 1),
-    )
-    m.load_state_dict(state_dict)
-    return m
-
-
-def _orient_probs(img_pil):
-    _ensure_models()
-    t = _orient_tfm(img_pil.convert("RGB")).unsqueeze(0).to(_device)
-    with torch.no_grad():
-        return F.softmax(_orient_model(t), dim=1)[0].cpu().numpy()
-
-
-def _orient_predict(img_pil):
-    return _ORIENT_ANGLES[int(np.argmax(_orient_probs(img_pil)))]
-
-
-def _regressor_predict(img_pil):
-    _ensure_models()
-    t = _regressor_tfm(img_pil.convert("RGB")).unsqueeze(0).to(_device)
-    with torch.no_grad():
-        return float(_regressor(t).item())
 
 
 # ============== rotate / crop helpers ==============
+
 
 def _rotate(img_pil, angle):
     if abs(angle) < 0.01:
@@ -204,6 +166,7 @@ def _crop_white(img_pil, threshold=250, margin_pct=0.02):
 
 # ============== public API ==============
 
+
 def detect_angle(image):
     """Определяет угол наклона документа.
 
@@ -213,20 +176,28 @@ def detect_angle(image):
     Returns:
         float: угол в градусах (0–359). Поверни изображение на этот угол → выпрямится.
     """
+    _ensure_models()
+
     if isinstance(image, (str, Path)):
         image = Image.open(image).convert("RGB")
     else:
         image = image.convert("RGB")
+    image = ImageOps.exif_transpose(image)
 
-    # 1. Light student → мелкий угол (±30°)
-    skew = _regressor_predict(image)
+    # 1. Fine-angle regressor ±45°
+    x = _skew_tfm(image).unsqueeze(0).to(_device)
+    with torch.no_grad():
+        skew = float(_skew_model(x).item())
+
+    # 2. Поворот по skew + adaptive crop
     corrected = _rotate(image, skew)
-
-    # 2. Adaptive crop — убираем белые поля после поворота
     cropped = _crop_white(corrected)
 
-    # 3. Phase C orientation → 0/90/180/270
-    orientation = _orient_predict(cropped)
+    # 3. Orientation classifier 0/90/180/270
+    x = _orient_tfm(cropped).unsqueeze(0).to(_device)
+    with torch.no_grad():
+        cls = int(_orient_model(x).argmax(1).item())
+    orientation = _ORIENT_ANGLES[cls]
 
     total = (skew + float(orientation)) % 360
     return round(total, 2)
