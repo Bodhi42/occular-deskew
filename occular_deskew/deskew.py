@@ -184,22 +184,22 @@ def detect_angle(image):
         image = image.convert("RGB")
     image = ImageOps.exif_transpose(image)
 
-    # 1. Fine-angle regressor ±45°
-    x = _skew_tfm(image).unsqueeze(0).to(_device)
-    with torch.no_grad():
-        skew = float(_skew_model(x).item())
-
-    # 2. Поворот по skew + adaptive crop
-    corrected = _rotate(image, skew)
-    cropped = _crop_white(corrected)
-
-    # 3. Orientation classifier 0/90/180/270
-    x = _orient_tfm(cropped).unsqueeze(0).to(_device)
+    # 1. Orientation classifier 0/90/180/270 (на исходном изображении)
+    x = _orient_tfm(image).unsqueeze(0).to(_device)
     with torch.no_grad():
         cls = int(_orient_model(x).argmax(1).item())
     orientation = _ORIENT_ANGLES[cls]
 
-    total = (skew + float(orientation)) % 360
+    # 2. Поворачиваем в upright по предсказанной ориентации + adaptive crop
+    corrected = _rotate(image, orientation)
+    cropped = _crop_white(corrected)
+
+    # 3. Fine-angle regressor ±45° — на уже почти-upright документе (в распределении ±45°)
+    x = _skew_tfm(cropped).unsqueeze(0).to(_device)
+    with torch.no_grad():
+        skew = float(_skew_model(x).item())
+
+    total = (float(orientation) + skew) % 360
     return round(total, 2)
 
 
