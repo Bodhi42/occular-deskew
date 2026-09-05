@@ -5,6 +5,14 @@ Document deskew: detect and correct the rotation angle of a document of any kind
 ## Installation
 
 ```bash
+pip install occular-deskew
+```
+
+For GPU orientation add `onnxruntime-gpu`. Optional backends:
+`pip install occular-deskew[deskew]` (pip deskew fine-angle), `[paddle]` (PP-LCNet orientation),
+`[legacy]` (retired SigLIP/DINOv2). Or install from source:
+
+```bash
 pip install git+https://github.com/Bodhi42/occular-deskew.git
 ```
 
@@ -64,6 +72,14 @@ Smoke + regression gate: torch-free import, all backends run, OriNet weights loa
 Document deskew: определение и коррекция угла наклона документа любого типа — от паспортов и дипломов до чеков и форм. Один вызов `deskew(image)` → выпрямленная картинка.
 
 ## Установка
+
+```bash
+pip install occular-deskew
+```
+
+Для GPU-ориентации доставьте `onnxruntime-gpu`. Опциональные бэкенды:
+`pip install occular-deskew[deskew]` (мелкий угол через pip deskew), `[paddle]` (ориентация PP-LCNet),
+`[legacy]` (выведенные SigLIP/DINOv2). Либо из исходников:
 
 ```bash
 pip install git+https://github.com/Bodhi42/occular-deskew.git
