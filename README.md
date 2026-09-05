@@ -27,16 +27,35 @@ upright.save("doc_upright.jpg")
 
 Accepts a `PIL.Image` or a path to a file.
 
-## v0.4.0 — architecture
+## v0.5.0 — architecture
 
-Two-stage pipeline based on **transformer backbones with LoRA adapters**:
+Lightweight pipeline, **torch-free by default** (ONNX + OpenCV):
 
-1. **Fine-angle skew regressor** — DINOv2-Small (22M params, frozen) + LoRA r=8 + regression head. Predicts a fine rotation angle in the range ±45°. Trained on 160k auto-labeled documents. Val: AED 0.33°, p95 0.92°, acc≤2°=98.7%, acc≤5°=99.8%.
-2. **Orientation classifier** — SigLIP-Base (93M params, frozen) + LoRA r=16 + classification head. Classifies coarse orientation among 0° / 90° / 180° / 270°. Trained on 89k documents from 139 countries with EMA + CutMix. Val: 97.43% on val × 4 rotations.
+1. **Fine-angle** — FHT (OpenCV Hough + weighted median), ±45°, levels the page to the nearest axis.
+2. **Orientation** — OriNet (ONNX, ~4.8 MB, C4-TTA) → 0° / 90° / 180° / 270°, runs on GPU.
 
-Order: skew regressor → rotate → adaptive crop → orientation classifier → total angle.
+Order (`fht_first`, default): FHT levels the page → OriNet votes on the axis-aligned page (its training distribution) → total angle. This replaced the previous DINOv2 (skew) + SigLIP (orientation) LoRA models — both were retired.
 
-LoRA-trainable parameters: **0.39M (skew) + 1.60M (orient) = ~2M** total. Both base models are downloaded from HuggingFace Hub on first call (~370 MB SigLIP + ~85 MB DINOv2 cached locally).
+Benchmarks:
+- **Orientation: 100%** on opendocs (113 clean docs), 93.65% on a mixed 2000-scan set. Tesseract OSD: 78.8% on opendocs (with ~12% outright failures) and 20.4% on the noisy set.
+- `fht_first` vs legacy orient-first order: errors >5° **127 vs 285** (180° flips 14 vs 105).
+- Fine-angle (FHT) median residual **0.01°**.
+
+### Backends (env vars)
+- `OCCULAR_ORIENT_BACKEND` = `orinet` (default) | `siglip` (legacy, torch) | `paddle` (PP-LCNet)
+- `OCCULAR_SKEW_BACKEND` = `fht` (default) | `projection` | `deskew` (pip `deskew` lib) | `dinov2` (legacy, torch)
+- `OCCULAR_PIPELINE_ORDER` = `fht_first` (default) | `orient_first`
+
+The default backends need neither torch nor any downloaded transformer weights.
+
+### Pre-release check
+
+```bash
+python scripts/pre_release_check.py            # uses a clean doc set if found
+OCCULAR_TEST_DOCS=/path/to/docs python scripts/pre_release_check.py
+```
+
+Smoke + regression gate: torch-free import, all backends run, OriNet weights load, orientation ≥ 95%, FHT fine median ≤ 1°. Exit 0 = safe to release, 1 = do not release (CI-friendly).
 
 ---
 
@@ -69,13 +88,32 @@ upright.save("doc_upright.jpg")
 
 Принимает `PIL.Image` или путь к файлу.
 
-## v0.4.0 — архитектура
+## v0.5.0 — архитектура
 
-Двухступенчатый пайплайн на **трансформер-бэкбонах с LoRA-адаптерами**:
+Лёгкий пайплайн, **по умолчанию без torch** (ONNX + OpenCV):
 
-1. **Регрессор мелкого угла** — DINOv2-Small (22M params, заморожен) + LoRA r=8 + regression-голова. Предсказывает мелкий угол поворота в диапазоне ±45°. Обучен на 160k автоматически размеченных документов. Val: AED 0.33°, p95 0.92°, acc≤2°=98.7%, acc≤5°=99.8%.
-2. **Классификатор ориентации** — SigLIP-Base (93M params, заморожен) + LoRA r=16 + classification-голова. Определяет крупную ориентацию среди 0° / 90° / 180° / 270°. Обучен на 89k документов из 139 стран с EMA + CutMix. Val: 97.43% на val × 4 ротациях.
+1. **Мелкий угол** — FHT (OpenCV Hough + взвешенная медиана), ±45°, выравнивает страницу по ближайшей оси.
+2. **Ориентация** — OriNet (ONNX, ~4.8 МБ, C4-TTA) → 0° / 90° / 180° / 270°, работает на GPU.
 
-Порядок: регрессор → поворот → adaptive crop → классификатор → итоговый угол.
+Порядок (`fht_first`, по умолчанию): FHT выравнивает по осям → OriNet голосует на осе-выровненной странице (в своём распределении обучения) → итоговый угол. Это заменило прежние LoRA-модели DINOv2 (наклон) + SigLIP (ориентация) — обе выведены из эксплуатации.
 
-Trainable LoRA-параметров: **0.39M (skew) + 1.60M (orient) = ~2M** всего. Базовые модели подтягиваются с HuggingFace Hub при первом вызове (~370 МБ SigLIP + ~85 МБ DINOv2 кэшируются локально).
+Бенчмарки:
+- **Ориентация: 100%** на opendocs (113 чистых док.), 93.65% на смешанном наборе из 2000 сканов. Tesseract OSD: 78.8% на opendocs (с ~12% отказов) и 20.4% на грязном наборе.
+- Порядок `fht_first` vs старый orient-first: ошибок >5° **127 vs 285** (180°-перевороты 14 vs 105).
+- Мелкий угол (FHT), median остаточной ошибки **0.01°**.
+
+### Бэкенды (переменные окружения)
+- `OCCULAR_ORIENT_BACKEND` = `orinet` (по умолч.) | `siglip` (legacy, torch) | `paddle` (PP-LCNet)
+- `OCCULAR_SKEW_BACKEND` = `fht` (по умолч.) | `projection` | `deskew` (pip-библиотека `deskew`) | `dinov2` (legacy, torch)
+- `OCCULAR_PIPELINE_ORDER` = `fht_first` (по умолч.) | `orient_first`
+
+Бэкенды по умолчанию не требуют ни torch, ни скачивания трансформер-весов.
+
+### Проверка перед релизом
+
+```bash
+python scripts/pre_release_check.py            # использует чистый набор, если найден
+OCCULAR_TEST_DOCS=/путь/к/докам python scripts/pre_release_check.py
+```
+
+Smoke + регрессия: torch-free импорт, все бэкенды работают, веса OriNet грузятся, ориентация ≥ 95%, median FHT ≤ 1°. Exit 0 = можно релизить, 1 = нельзя (для CI).
